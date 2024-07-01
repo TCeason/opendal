@@ -15,8 +15,6 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use bytes::Buf;
-
 use super::operator_functions::*;
 use crate::raw::*;
 use crate::*;
@@ -143,9 +141,9 @@ impl BlockingOperator {
     ///
     /// # Notes
     ///
-    /// For fetch metadata of entries returned by [`Lister`], it's better to use [`list_with`] and
-    /// [`lister_with`] with `metakey` query like `Metakey::ContentLength | Metakey::LastModified`
-    /// so that we can avoid extra requests.
+    /// For fetch metadata of entries returned by [`BlockingLister`], it's better to
+    /// use [`BlockingOperator::list_with`] and [`BlockingOperator::lister_with`] with `metakey`
+    /// query like `Metakey::ContentLength | Metakey::LastModified` so that we can avoid extra requests.
     ///
     /// # Behavior
     ///
@@ -200,8 +198,9 @@ impl BlockingOperator {
     ///
     /// # Notes
     ///
-    /// For fetch metadata of entries returned by [`Lister`], it's better to use [`list_with`] and
-    /// [`lister_with`] with `metakey` query like `Metakey::ContentLength | Metakey::LastModified`
+    /// For fetch metadata of entries returned by [`Lister`], it's better to use
+    /// [`Operator::list_with`] and [`Operator::lister_with`] with `metakey` query like
+    /// `Metakey::ContentLength | Metakey::LastModified`
     /// so that we can avoid extra requests.
     ///
     /// # Behavior
@@ -629,8 +628,8 @@ impl BlockingOperator {
         FunctionWrite(OperatorFunction::new(
             self.inner().clone(),
             path,
-            (OpWrite::default(), bs),
-            |inner, path, (args, mut bs)| {
+            (OpWrite::default(), OpWriter::default(), bs),
+            |inner, path, (args, options, bs)| {
                 if !validate_path(&path, EntryMode::FILE) {
                     return Err(
                         Error::new(ErrorKind::IsADirectory, "write path is a directory")
@@ -640,13 +639,10 @@ impl BlockingOperator {
                     );
                 }
 
-                let (_, mut w) = inner.blocking_write(&path, args)?;
-                while !bs.is_empty() {
-                    let n = w.write(bs.clone())?;
-                    bs.advance(n);
-                }
+                let context = WriteContext::new(inner, path, args, options);
+                let mut w = BlockingWriter::new(context)?;
+                w.write(bs)?;
                 w.close()?;
-
                 Ok(())
             },
         ))
@@ -702,8 +698,8 @@ impl BlockingOperator {
         FunctionWriter(OperatorFunction::new(
             self.inner().clone(),
             path,
-            OpWrite::default(),
-            |inner, path, args| {
+            (OpWrite::default(), OpWriter::default()),
+            |inner, path, (args, options)| {
                 let path = normalize_path(&path);
 
                 if !validate_path(&path, EntryMode::FILE) {
@@ -715,7 +711,9 @@ impl BlockingOperator {
                     );
                 }
 
-                BlockingWriter::create(inner.clone(), &path, args)
+                let context = WriteContext::new(inner, path, args, options);
+                let w = BlockingWriter::new(context)?;
+                Ok(w)
             },
         ))
     }

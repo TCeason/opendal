@@ -17,7 +17,8 @@
 
 use std::cmp::Ordering;
 
-use futures::{Stream, StreamExt};
+use futures::Stream;
+use futures::StreamExt;
 use oio::Read;
 
 use crate::raw::*;
@@ -85,12 +86,12 @@ impl HttpBody {
             Ordering::Equal => Ok(()),
             Ordering::Less => Err(Error::new(
                 ErrorKind::Unexpected,
-                &format!("http response got too little data, expect: {expect}, actual: {actual}"),
+                format!("http response got too little data, expect: {expect}, actual: {actual}"),
             )
             .set_temporary()),
             Ordering::Greater => Err(Error::new(
                 ErrorKind::Unexpected,
-                &format!("http response got too much data, expect: {expect}, actual: {actual}"),
+                format!("http response got too much data, expect: {expect}, actual: {actual}"),
             )
             .set_temporary()),
         }

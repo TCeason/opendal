@@ -21,7 +21,8 @@ use std::task::ready;
 use std::task::Context;
 use std::task::Poll;
 
-use futures::{AsyncWrite, SinkExt};
+use futures::AsyncWrite;
+use futures::SinkExt;
 
 use crate::raw::*;
 use crate::*;
@@ -39,7 +40,7 @@ pub struct FuturesAsyncWriter {
 impl FuturesAsyncWriter {
     /// NOTE: don't allow users to create directly.
     #[inline]
-    pub(crate) fn new(w: oio::Writer) -> Self {
+    pub(crate) fn new(w: WriteGenerator<oio::Writer>) -> Self {
         FuturesAsyncWriter {
             sink: BufferSink::new(w),
             buf: oio::FlexBuf::new(256 * 1024),
@@ -112,10 +113,23 @@ impl AsyncWrite for FuturesAsyncWriter {
 mod tests {
     use super::*;
     use crate::raw::MaybeSend;
+    use std::collections::HashMap;
+    use std::sync::Arc;
 
-    #[test]
-    fn test_trait() {
-        let v = FuturesAsyncWriter::new(Box::new(()));
+    #[tokio::test]
+    async fn test_trait() {
+        let op = Operator::via_map(Scheme::Memory, HashMap::default()).unwrap();
+
+        let acc = op.into_inner();
+        let ctx = Arc::new(WriteContext::new(
+            acc,
+            "test".to_string(),
+            OpWrite::new(),
+            OpWriter::new().with_chunk(1),
+        ));
+        let write_gen = WriteGenerator::create(ctx).await.unwrap();
+
+        let v = FuturesAsyncWriter::new(write_gen);
 
         let _: Box<dyn Unpin + MaybeSend + Sync + 'static> = Box::new(v);
     }

@@ -15,13 +15,13 @@
 // specific language governing permissions and limitations
 // under the License.
 
+use std::cmp::Ordering;
 use std::fmt::Debug;
 use std::fmt::Formatter;
 use std::sync::Arc;
 
 use crate::raw::oio::FlatLister;
 use crate::raw::oio::PrefixLister;
-use crate::raw::TwoWays;
 use crate::raw::*;
 use crate::*;
 
@@ -134,7 +134,7 @@ impl<A: Access> CompleteAccessor<A> {
         let op = op.into();
         Error::new(
             ErrorKind::Unsupported,
-            &format!("service {scheme} doesn't support operation {op}"),
+            format!("service {scheme} doesn't support operation {op}"),
         )
         .with_operation(op)
     }
@@ -371,7 +371,7 @@ impl<A: Access> LayeredAccess for CompleteAccessor<A> {
     type Inner = A;
     type Reader = CompleteReader<A::Reader>;
     type BlockingReader = CompleteReader<A::BlockingReader>;
-    type Writer = TwoWays<CompleteWriter<A::Writer>, oio::ChunkedWriter<CompleteWriter<A::Writer>>>;
+    type Writer = CompleteWriter<A::Writer>;
     type BlockingWriter = CompleteWriter<A::BlockingWriter>;
     type Lister = CompleteLister<A, A::Lister>;
     type BlockingLister = CompleteLister<A, A::BlockingLister>;
@@ -398,10 +398,12 @@ impl<A: Access> LayeredAccess for CompleteAccessor<A> {
         if !capability.read {
             return Err(self.new_unsupported_error(Operation::Read));
         }
+
+        let size = args.range().size();
         self.inner
             .read(path, args)
             .await
-            .map(|(rp, r)| (rp, CompleteReader(r)))
+            .map(|(rp, r)| (rp, CompleteReader::new(r, size)))
     }
 
     async fn write(&self, path: &str, args: OpWrite) -> Result<(RpWrite, Self::Writer)> {
@@ -412,38 +414,15 @@ impl<A: Access> LayeredAccess for CompleteAccessor<A> {
         if args.append() && !capability.write_can_append {
             return Err(Error::new(
                 ErrorKind::Unsupported,
-                &format!(
+                format!(
                     "service {} doesn't support operation write with append",
                     self.info().scheme()
                 ),
             ));
         }
 
-        // Calculate buffer size.
-        let chunk_size = args.chunk().map(|mut size| {
-            if let Some(v) = capability.write_multi_max_size {
-                size = size.min(v);
-            }
-            if let Some(v) = capability.write_multi_min_size {
-                size = size.max(v);
-            }
-            if let Some(v) = capability.write_multi_align_size {
-                // Make sure size >= size first.
-                size = size.max(v);
-                size -= size % v;
-            }
-
-            size
-        });
-
         let (rp, w) = self.inner.write(path, args.clone()).await?;
         let w = CompleteWriter::new(w);
-
-        let w = match chunk_size {
-            None => TwoWays::One(w),
-            Some(size) => TwoWays::Two(oio::ChunkedWriter::new(w, size)),
-        };
-
         Ok((rp, w))
     }
 
@@ -514,9 +493,11 @@ impl<A: Access> LayeredAccess for CompleteAccessor<A> {
         if !capability.read || !capability.blocking {
             return Err(self.new_unsupported_error(Operation::Read));
         }
+
+        let size = args.range().size();
         self.inner
             .blocking_read(path, args)
-            .map(|(rp, r)| (rp, CompleteReader(r)))
+            .map(|(rp, r)| (rp, CompleteReader::new(r, size)))
     }
 
     fn blocking_write(&self, path: &str, args: OpWrite) -> Result<(RpWrite, Self::BlockingWriter)> {
@@ -528,7 +509,7 @@ impl<A: Access> LayeredAccess for CompleteAccessor<A> {
         if args.append() && !capability.write_can_append {
             return Err(Error::new(
                 ErrorKind::Unsupported,
-                &format!(
+                format!(
                     "service {} doesn't support operation write with append",
                     self.info().scheme()
                 ),
@@ -584,18 +565,66 @@ impl<A: Access> LayeredAccess for CompleteAccessor<A> {
 pub type CompleteLister<A, P> =
     FourWays<P, FlatLister<Arc<A>, P>, PrefixLister<P>, PrefixLister<FlatLister<Arc<A>, P>>>;
 
-pub struct CompleteReader<R>(R);
+pub struct CompleteReader<R> {
+    inner: R,
+    size: Option<u64>,
+    read: u64,
+}
+
+impl<R> CompleteReader<R> {
+    pub fn new(inner: R, size: Option<u64>) -> Self {
+        Self {
+            inner,
+            size,
+            read: 0,
+        }
+    }
+
+    pub fn check(&self) -> Result<()> {
+        let Some(size) = self.size else {
+            return Ok(());
+        };
+
+        match self.read.cmp(&size) {
+            Ordering::Equal => Ok(()),
+            Ordering::Less => Err(
+                Error::new(ErrorKind::Unexpected, "reader got too little data")
+                    .with_context("expect", size)
+                    .with_context("actual", self.read),
+            ),
+            Ordering::Greater => Err(
+                Error::new(ErrorKind::Unexpected, "reader got too much data")
+                    .with_context("expect", size)
+                    .with_context("actual", self.read),
+            ),
+        }
+    }
+}
 
 impl<R: oio::Read> oio::Read for CompleteReader<R> {
     async fn read(&mut self) -> Result<Buffer> {
-        let buf = self.0.read().await?;
+        let buf = self.inner.read().await?;
+
+        if buf.is_empty() {
+            self.check()?;
+        } else {
+            self.read += buf.len() as u64;
+        }
+
         Ok(buf)
     }
 }
 
 impl<R: oio::BlockingRead> oio::BlockingRead for CompleteReader<R> {
     fn read(&mut self) -> Result<Buffer> {
-        let buf = self.0.read()?;
+        let buf = self.inner.read()?;
+
+        if buf.is_empty() {
+            self.check()?;
+        } else {
+            self.read += buf.len() as u64;
+        }
+
         Ok(buf)
     }
 }

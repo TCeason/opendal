@@ -15,12 +15,15 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use crate::raw::BoxedStaticFuture;
-use futures::future::RemoteHandle;
-use futures::FutureExt;
 use std::future::Future;
 use std::pin::Pin;
-use std::task::{Context, Poll};
+use std::task::Context;
+use std::task::Poll;
+
+use futures::future::RemoteHandle;
+use futures::FutureExt;
+
+use crate::raw::BoxedStaticFuture;
 
 /// Execute trait is used to execute task in background.
 ///
@@ -87,6 +90,14 @@ impl<T: 'static> Task<T> {
     #[inline]
     pub fn new(handle: RemoteHandle<T>) -> Self {
         Self { handle }
+    }
+
+    /// Replace the task with a new task.
+    ///
+    /// The old task will be dropped directly.
+    #[inline]
+    pub fn replace(&mut self, new_task: Self) {
+        self.handle = new_task.handle;
     }
 }
 
